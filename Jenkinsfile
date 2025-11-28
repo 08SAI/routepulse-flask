@@ -12,18 +12,36 @@ pipeline {
       steps {
         script {
           if (isUnix()) {
-            // Check docker availability on Unix/Linux agent
+            // Unix/Linux pre-check: ensure docker CLI present and daemon responds
             sh '''
               if ! command -v docker >/dev/null 2>&1; then
                 echo "ERROR: docker CLI not available on PATH"; exit 2
               fi
               docker --version || { echo "ERROR: docker --version failed"; exit 3; }
+              # Try to contact the daemon
+              if ! docker info >/dev/null 2>&1; then
+                echo "ERROR: Docker daemon not running or not accessible (docker info failed)"
+                echo "Hint: ensure the Docker daemon is running (systemctl start docker), or set DOCKER_HOST to a reachable daemon."
+                docker info 2>&1 | sed -n '1,200p' || true
+                exit 4
+              fi
+              echo "Docker CLI and daemon OK."
             '''
           } else {
-            // Windows agent
+            // Windows pre-check: check executable and daemon with docker info
             bat '''
               where docker || (echo ERROR: docker CLI not found & exit /b 2)
               docker --version || (echo ERROR: docker --version failed & exit /b 3)
+              rem Attempt to contact the Docker daemon; capture output to file for diagnostics
+              docker info > docker_info.txt 2>&1 || (
+                type docker_info.txt
+                echo.
+                echo ERROR: Docker daemon not running or not accessible (docker info failed)
+                echo Hint: On Windows start Docker Desktop (or run: Start-Service com.docker.service as Administrator)
+                echo Or configure DOCKER_HOST to a remote Docker daemon and set it in Jenkins credentials/environment
+                exit /b 4
+              )
+              echo Docker CLI and daemon OK.
             '''
           }
         }
@@ -53,7 +71,7 @@ pipeline {
         script {
           if (isUnix()) {
             sh """
-              if docker ps -a --format '{{.Names}}' | grep -w ${CONTAINER}; then
+              if docker ps -a --format '{{.Names}}' | grep -w ${CONTAINER} >/dev/null 2>&1; then
                 docker rm -f ${CONTAINER} || true
               fi
             """
@@ -84,24 +102,17 @@ pipeline {
       steps {
         script {
           if (isUnix()) {
-            // Wait briefly for the app to start, then check listening port and HTTP response
             sh '''
               sleep 2
-              echo "=== docker ps ==="
               docker ps --filter "name=${CONTAINER}" --format "table {{.ID}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"
-              echo "=== ss check ==="
               ss -ltnp | grep -E ":${PORT}\\s" || true
-              echo "=== curl check ==="
               curl -sS --max-time 5 http://127.0.0.1:${PORT}/ || { echo "ERROR: HTTP check failed"; exit 4; }
             '''
           } else {
             bat '''
               timeout /t 2 /nobreak >nul
-              echo === docker ps ===
               docker ps --filter "name=%CONTAINER%" --format "table {{.ID}}    {{.Image}}    {{.Status}}    {{.Ports}}"
-              echo === netstat check ===
               netstat -ano | findstr :%PORT% || echo WARNING: netstat did not show port
-              echo === curl check ===
               curl -sS --max-time 5 http://127.0.0.1:%PORT% || (echo ERROR: HTTP check failed & exit /b 4)
             '''
           }
@@ -115,3 +126,4 @@ pipeline {
     failure { echo "Build finished: FAILURE" }
   }
 }
+
